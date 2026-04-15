@@ -1,0 +1,10 @@
+ACTION REQUIRED
+───────────────
+Please upload an image of your name initials to this folder (misc/).
+
+Suggested filename:  initials_DT.png   (replace "DT" with your actual initials)
+
+Steps:
+  1. Create or photograph your initials image.
+  2. Copy the image file into:  p2_dilip_riddhi/misc/
+  3. Delete (or keep) this placeholder file once the image is added.

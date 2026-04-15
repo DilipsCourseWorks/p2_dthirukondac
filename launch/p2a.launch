@@ -1,0 +1,20 @@
+<!-- CS 424/524 - Assignment 2, Part 1: Autonomous Navigation -->
+<!-- Launches navigation_node.py which drives the robot L1 -> L2 -> L3 -> L1 -->
+<launch>
+
+  <!-- Optional: suppress TF warnings if running without a full robot stack -->
+  <arg name="output" default="screen"/>
+
+  <node pkg="p2_dilip_riddhi"
+        type="navigation_node.py"
+        name="navigation_node"
+        output="$(arg output)"
+        required="true">
+    <!--
+      If move_base is NOT already running, uncomment the include below
+      and point it at your robot's move_base launch file.
+    -->
+    <!-- <include file="$(find your_robot_bringup)/launch/move_base.launch"/> -->
+  </node>
+
+</launch>

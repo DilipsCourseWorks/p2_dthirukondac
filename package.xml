@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>p2_dilip_riddhi</name>
+  <version>1.0.0</version>
+  <description>
+    CS 424/524 Intelligent Mobile Robotics - Assignment 2.
+    Part 1: Autonomous Navigation (Python).
+    Part 2: Vision-based Ball Follower with depth-first tracking (C++).
+  </description>
+
+  <maintainer email="dthirukondac@student.edu">Dilip Thirukondac</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>roscpp</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>cv_bridge</build_depend>
+  <build_depend>image_transport</build_depend>
+  <build_depend>actionlib</build_depend>
+  <build_depend>move_base_msgs</build_depend>
+
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+  <exec_depend>actionlib</exec_depend>
+  <exec_depend>move_base_msgs</exec_depend>
+</package>

@@ -1,0 +1,27 @@
+<!-- CS 424/524 - Assignment 2, Part 2: Vision-based Ball Follower -->
+<!-- Launches vision_follower (C++) with depth-primary tracking -->
+<launch>
+
+  <arg name="output"       default="screen"/>
+
+  <!-- ── Topic remapping ─────────────────────────────────────────────────
+       Adjust these arguments to match the actual topic names published
+       by your RGBD camera driver (e.g. RealSense, Kinect, Astra).
+  ──────────────────────────────────────────────────────────────────── -->
+  <arg name="depth_topic"   default="/camera/depth/image_raw"/>
+  <arg name="rgb_topic"     default="/camera/rgb/image_raw"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+
+  <node pkg="p2_dilip_riddhi"
+        type="vision_follower"
+        name="vision_follower"
+        output="$(arg output)"
+        required="true">
+
+    <param name="depth_topic"   value="$(arg depth_topic)"/>
+    <param name="rgb_topic"     value="$(arg rgb_topic)"/>
+    <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+
+  </node>
+
+</launch>
