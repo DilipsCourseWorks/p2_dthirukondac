@@ -1,5 +1,5 @@
 # CS 424/524 – Intelligent Mobile Robotics
-## Assignment 2 – `p2_dilip_riddhi`
+## Assignment 2 – `p2_dthirukondac`
 
 ### Team / Collaborators
 | Name   | Role          |
@@ -29,12 +29,12 @@ source devel/setup.bash
 
 **Part 1 – Autonomous Navigation:**
 ```bash
-roslaunch p2_dilip_riddhi p2a.launch
+roslaunch p2_dthirukondac p2a.launch
 ```
 
 **Part 2 – Ball Follower:**
 ```bash
-roslaunch p2_dilip_riddhi p2b.launch
+roslaunch p2_dthirukondac p2b.launch
 ```
 
 ---

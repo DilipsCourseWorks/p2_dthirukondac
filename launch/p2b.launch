@@ -12,7 +12,7 @@
   <arg name="rgb_topic"     default="/camera/rgb/image_raw"/>
   <arg name="cmd_vel_topic" default="/cmd_vel"/>
 
-  <node pkg="p2_dilip_riddhi"
+  <node pkg="p2_dthirukondac"
         type="vision_follower"
         name="vision_follower"
         output="$(arg output)"

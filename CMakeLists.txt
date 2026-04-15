@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(p2_dilip_riddhi)
+project(p2_dthirukondac)
 
 find_package(catkin REQUIRED COMPONENTS
   roscpp
