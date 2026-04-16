@@ -9,8 +9,8 @@
        by your RGBD camera driver (e.g. RealSense, Kinect, Astra).
   ──────────────────────────────────────────────────────────────────── -->
   <arg name="depth_topic"   default="/camera/depth/image_raw"/>
-  <arg name="rgb_topic"     default="/camera/rgb/image_raw"/>
-  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="rgb_topic"     default="/camera/color/image_raw"/>
+  <arg name="cmd_vel_topic" default="/mobile_base/commands/velocity"/>
 
   <node pkg="p2_dthirukondac"
         type="vision_follower"
