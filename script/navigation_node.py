@@ -28,9 +28,9 @@ from actionlib_msgs.msg import GoalStatus
 # Orientation w=1.0 means "facing the +X axis"; adjust yaw as needed.
 # ---------------------------------------------------------------------------
 WAYPOINTS = {
-    "L1": {"x":  0.672, "y":  0.906, "z": 0.0, "yaw_w": 1.0},
-    "L2": {"x":  6.660, "y": 12.700, "z": 0.0, "yaw_w": 1.0},
-    "L3": {"x":  7.310, "y":  0.571, "z": 0.0, "yaw_w": 1.0},
+    "L1": {"x":  1.39, "y": -1.88, "z": 0.0, "yaw_w": 1.0},
+    "L2": {"x":  8.52, "y":  5.96, "z": 0.0, "yaw_w": 1.0},
+    "L3": {"x": 12.30, "y": -1.67, "z": 0.0, "yaw_w": 1.0},
 }
 
 # Visit order: start at L1, go to L2, then L3, then return to L1
