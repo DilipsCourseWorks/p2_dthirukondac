@@ -1,30 +1,7 @@
-/**
- * CS 424/524 - Intelligent Mobile Robotics | Assignment 2 - Part 2
- * Vision Follower Node  (depth-primary strategy for 20 % bonus)
- *
- * Strategy
- * ─────────
- * PRIMARY  (depth-only)  – Always active.
- *   • Reads the 32FC1/16UC1 depth image from the RGBD camera.
- *   • Finds the closest non-NaN pixel within the centre horizontal band.
- *   • Steers toward it and maintains ~1 m (3 ft) standoff distance.
- *   • Works even when the RGB stream is unavailable or the lights are off.
- *
- * SECONDARY (colour confirmation) – Active only when RGB is available.
- *   • Finds the "most red" pixel in the RGB frame.
- *   • Its column is used to bias the steering angle if it is close to the
- *     depth-derived centre — confirming we are tracking the red ball rather
- *     than any random nearby object.
- *   • If RGB goes dark / is covered, the node falls back gracefully to the
- *     depth-only path without interruption.
- *
- * Topics (adjust to your robot's actual topic names in the launch file):
- *   Subscribed:
- *     /camera/depth/image_raw          sensor_msgs/Image   (depth)
- *     /camera/rgb/image_raw            sensor_msgs/Image   (colour, optional)
- *   Published:
- *     /cmd_vel                         geometry_msgs/Twist
- */
+// CS 424/524 - Assignment 2, Part 2
+// Ball follower node - follows a red ball using RGB and depth cameras
+// Keeps a distance of 1 meter (about 3 feet) from the ball
+// Bonus: uses depth as primary signal, RGB is optional confirmation
 
 #include <ros/ros.h>
 #include <sensor_msgs/Image.h>
@@ -36,64 +13,45 @@
 #include <limits>
 #include <mutex>
 
-// ── Tunable parameters ───────────────────────────────────────────────────────
+// distance we want to keep from the ball
+static const double TARGET_DIST = 1.0;
+static const double MAX_LINEAR  = 0.3;
+static const double MAX_ANGULAR = 0.6;
+static const double DIST_TOL    = 0.10;
+static const double MAX_DEPTH   = 5.0;
 
-static constexpr double TARGET_DISTANCE_M  = 1.0;   // 1 m ≈ 3 ft standoff
-static constexpr double MAX_LINEAR_SPEED   = 0.3;   // m/s
-static constexpr double MAX_ANGULAR_SPEED  = 0.6;   // rad/s
-static constexpr double DISTANCE_TOLERANCE = 0.10;  // ±10 cm dead-band
+// only look at the middle band of the depth image
+static const double BAND_TOP    = 0.30;
+static const double BAND_BOTTOM = 0.70;
 
-// Horizontal band (fraction of frame height) used for closest-point search
-static constexpr double BAND_TOP_FRAC    = 0.30;
-static constexpr double BAND_BOTTOM_FRAC = 0.70;
-
-// Maximum depth value to consider as valid (metres); reject walls far away
-static constexpr double MAX_VALID_DEPTH_M = 5.0;
-
-// How far (in columns) the RGB "red centroid" may be from the depth centroid
-// and still be counted as a confirmation hit
-static constexpr int RGB_DEPTH_COLUMN_TOLERANCE = 60;  // pixels
-
-// ── Node state ───────────────────────────────────────────────────────────────
-
-struct FollowerState {
-    // Depth-derived values (updated in depth callback)
-    double  closest_dist_m{std::numeric_limits<double>::quiet_NaN()};
-    double  closest_col_frac{0.5};   // normalised [0,1]; 0.5 = straight ahead
-
-    // RGB-derived values (updated in colour callback, optional)
-    bool    rgb_active{false};
-    double  red_col_frac{0.5};
-
+// shared state between callbacks
+struct State {
+    double depth_dist = std::numeric_limits<double>::quiet_NaN();
+    double depth_col  = 0.5;
+    bool   rgb_found  = false;
+    double rgb_col    = 0.5;
     std::mutex mtx;
 };
 
-static FollowerState g_state;
+static State g_state;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Return the column fraction [0,1] and depth [m] of the closest non-NaN,
- * non-zero pixel within the horizontal band of the depth image.
- */
-static bool findClosestInBand(const cv::Mat& depth_f32,
-                               double& out_col_frac,
-                               double& out_dist_m)
+// find the closest point in the middle band of the depth image
+bool getClosestPoint(const cv::Mat& depth, double& col_out, double& dist_out)
 {
-    const int rows = depth_f32.rows;
-    const int cols = depth_f32.cols;
-    const int row_top    = static_cast<int>(rows * BAND_TOP_FRAC);
-    const int row_bottom = static_cast<int>(rows * BAND_BOTTOM_FRAC);
+    int rows = depth.rows;
+    int cols = depth.cols;
+    int r_top = (int)(rows * BAND_TOP);
+    int r_bot = (int)(rows * BAND_BOTTOM);
 
     double min_d = std::numeric_limits<double>::max();
-    int    min_c = cols / 2;
-    bool   found = false;
+    int min_c = cols / 2;
+    bool found = false;
 
-    for (int r = row_top; r < row_bottom; ++r) {
-        const float* row_ptr = depth_f32.ptr<float>(r);
-        for (int c = 0; c < cols; ++c) {
-            float d = row_ptr[c];
-            if (std::isnan(d) || d <= 0.0f || d > MAX_VALID_DEPTH_M)
+    for (int r = r_top; r < r_bot; r++) {
+        const float* row = depth.ptr<float>(r);
+        for (int c = 0; c < cols; c++) {
+            float d = row[c];
+            if (std::isnan(d) || d <= 0 || d > MAX_DEPTH)
                 continue;
             if (d < min_d) {
                 min_d = d;
@@ -104,196 +62,155 @@ static bool findClosestInBand(const cv::Mat& depth_f32,
     }
 
     if (found) {
-        out_col_frac = static_cast<double>(min_c) / static_cast<double>(cols - 1);
-        out_dist_m   = min_d;
+        col_out  = (double)min_c / (double)(cols - 1);
+        dist_out = min_d;
     }
     return found;
 }
 
-/**
- * Find the centroid column of the "most red" region in an BGR image.
- * Returns false when no sufficiently red pixels are found.
- */
-static bool findRedCentroid(const cv::Mat& bgr, double& out_col_frac)
+// find the "most red" region in the image and return its column position
+bool getRedColumn(const cv::Mat& bgr, double& col_out)
 {
-    // Convert to HSV for robust red detection under varying lighting
     cv::Mat hsv;
     cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
 
-    // Red wraps around 0/180 in HSV
+    // red hue wraps around in HSV so we need two ranges
     cv::Mat mask1, mask2, mask;
-    cv::inRange(hsv, cv::Scalar(  0, 100,  60), cv::Scalar( 10, 255, 255), mask1);
-    cv::inRange(hsv, cv::Scalar(160, 100,  60), cv::Scalar(180, 255, 255), mask2);
+    cv::inRange(hsv, cv::Scalar(0, 100, 60),   cv::Scalar(10, 255, 255),  mask1);
+    cv::inRange(hsv, cv::Scalar(160, 100, 60), cv::Scalar(180, 255, 255), mask2);
     cv::bitwise_or(mask1, mask2, mask);
 
-    // Require a minimum blob size to suppress noise
     cv::Moments m = cv::moments(mask, true);
-    if (m.m00 < 200.0)   // fewer than 200 red pixels → ignore
+    if (m.m00 < 200.0)
         return false;
 
-    out_col_frac = (m.m10 / m.m00) / static_cast<double>(bgr.cols - 1);
+    col_out = (m.m10 / m.m00) / (double)(bgr.cols - 1);
     return true;
 }
 
-// ── ROS callbacks ─────────────────────────────────────────────────────────────
-
-void depthCallback(const sensor_msgs::ImageConstPtr& msg)
+void depthCb(const sensor_msgs::ImageConstPtr& msg)
 {
-    cv_bridge::CvImageConstPtr cv_ptr;
+    cv_bridge::CvImageConstPtr ptr;
+    cv::Mat depth_f32;
+
     try {
-        // Accept both 32FC1 (metres) and 16UC1 (millimetres) depth encodings
         if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
-            cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_32FC1);
+            ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_32FC1);
+            depth_f32 = ptr->image;
         } else if (msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
-            cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_16UC1);
-            // Convert mm → m
-            cv::Mat f32;
-            cv_ptr->image.convertTo(f32, CV_32FC1, 1.0 / 1000.0);
-            std::lock_guard<std::mutex> lock(g_state.mtx);
-            double col_frac, dist_m;
-            if (findClosestInBand(f32, col_frac, dist_m)) {
-                g_state.closest_col_frac = col_frac;
-                g_state.closest_dist_m   = dist_m;
-            }
-            return;
+            ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_16UC1);
+            ptr->image.convertTo(depth_f32, CV_32FC1, 1.0 / 1000.0);
         } else {
-            ROS_WARN_THROTTLE(5.0, "vision_follower: Unsupported depth encoding: %s",
-                              msg->encoding.c_str());
+            ROS_WARN_THROTTLE(5.0, "Unknown depth encoding: %s", msg->encoding.c_str());
             return;
         }
     } catch (cv_bridge::Exception& e) {
-        ROS_ERROR_THROTTLE(5.0, "vision_follower: cv_bridge depth exception: %s", e.what());
+        ROS_ERROR_THROTTLE(5.0, "cv_bridge error: %s", e.what());
         return;
     }
 
-    std::lock_guard<std::mutex> lock(g_state.mtx);
-    double col_frac, dist_m;
-    if (findClosestInBand(cv_ptr->image, col_frac, dist_m)) {
-        g_state.closest_col_frac = col_frac;
-        g_state.closest_dist_m   = dist_m;
-    }
-}
-
-void rgbCallback(const sensor_msgs::ImageConstPtr& msg)
-{
-    cv_bridge::CvImageConstPtr cv_ptr;
-    try {
-        cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
-    } catch (cv_bridge::Exception& e) {
-        ROS_WARN_THROTTLE(5.0, "vision_follower: cv_bridge RGB exception: %s", e.what());
+    double col, dist;
+    if (getClosestPoint(depth_f32, col, dist)) {
         std::lock_guard<std::mutex> lock(g_state.mtx);
-        g_state.rgb_active = false;
+        g_state.depth_col  = col;
+        g_state.depth_dist = dist;
+    }
+}
+
+void rgbCb(const sensor_msgs::ImageConstPtr& msg)
+{
+    cv_bridge::CvImageConstPtr ptr;
+    try {
+        ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+    } catch (cv_bridge::Exception& e) {
+        std::lock_guard<std::mutex> lock(g_state.mtx);
+        g_state.rgb_found = false;
         return;
     }
 
-    double col_frac;
-    bool found = findRedCentroid(cv_ptr->image, col_frac);
+    double col;
+    bool found = getRedColumn(ptr->image, col);
 
     std::lock_guard<std::mutex> lock(g_state.mtx);
-    g_state.rgb_active  = found;
+    g_state.rgb_found = found;
     if (found)
-        g_state.red_col_frac = col_frac;
+        g_state.rgb_col = col;
 }
-
-// ── Main ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char** argv)
 {
     ros::init(argc, argv, "vision_follower");
     ros::NodeHandle nh;
-    ros::NodeHandle nh_private("~");
+    ros::NodeHandle nh_priv("~");
 
-    // Allow topic remapping via private parameters (or use launch file remaps)
-    std::string depth_topic, rgb_topic, cmd_vel_topic;
-    nh_private.param<std::string>("depth_topic",   depth_topic,   "/camera/depth/image_raw");
-    nh_private.param<std::string>("rgb_topic",     rgb_topic,     "/camera/rgb/image_raw");
-    nh_private.param<std::string>("cmd_vel_topic", cmd_vel_topic, "/cmd_vel");
+    std::string depth_topic, rgb_topic, cmd_topic;
+    nh_priv.param<std::string>("depth_topic",   depth_topic, "/camera/depth/image_raw");
+    nh_priv.param<std::string>("rgb_topic",     rgb_topic,   "/camera/rgb/image_raw");
+    nh_priv.param<std::string>("cmd_vel_topic", cmd_topic,   "/cmd_vel");
 
     image_transport::ImageTransport it(nh);
+    image_transport::Subscriber depth_sub = it.subscribe(depth_topic, 1, depthCb);
+    image_transport::Subscriber rgb_sub   = it.subscribe(rgb_topic,   1, rgbCb);
 
-    image_transport::Subscriber depth_sub =
-        it.subscribe(depth_topic, 1, depthCallback);
+    ros::Publisher cmd_pub = nh.advertise<geometry_msgs::Twist>(cmd_topic, 10);
 
-    image_transport::Subscriber rgb_sub =
-        it.subscribe(rgb_topic, 1, rgbCallback);
+    ros::Rate rate(20);
 
-    ros::Publisher cmd_pub =
-        nh.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
-
-    ros::Rate loop_rate(20);  // 20 Hz control loop
-
-    ROS_INFO("vision_follower: Started. depth='%s'  rgb='%s'  cmd_vel='%s'",
-             depth_topic.c_str(), rgb_topic.c_str(), cmd_vel_topic.c_str());
-    ROS_INFO("vision_follower: Depth-primary tracking active. "
-             "RGB stream used as optional confirmation.");
+    ROS_INFO("vision_follower started. depth=%s rgb=%s cmd=%s",
+             depth_topic.c_str(), rgb_topic.c_str(), cmd_topic.c_str());
 
     while (ros::ok()) {
         ros::spinOnce();
 
-        geometry_msgs::Twist cmd;
-
-        double dist_m, col_frac;
-        bool   rgb_active, red_col_frac_valid;
-        double red_col_frac;
+        double dist, depth_col, rgb_col;
+        bool rgb_found;
 
         {
             std::lock_guard<std::mutex> lock(g_state.mtx);
-            dist_m              = g_state.closest_dist_m;
-            col_frac            = g_state.closest_col_frac;
-            rgb_active          = g_state.rgb_active;
-            red_col_frac        = g_state.red_col_frac;
-            red_col_frac_valid  = rgb_active;
+            dist       = g_state.depth_dist;
+            depth_col  = g_state.depth_col;
+            rgb_found  = g_state.rgb_found;
+            rgb_col    = g_state.rgb_col;
         }
 
-        if (std::isnan(dist_m)) {
-            // No valid depth reading yet — stop and wait
-            ROS_WARN_THROTTLE(2.0, "vision_follower: No depth data. Stopping.");
+        geometry_msgs::Twist cmd;
+
+        if (std::isnan(dist)) {
+            ROS_WARN_THROTTLE(2.0, "No depth data, stopping.");
             cmd_pub.publish(cmd);
-            loop_rate.sleep();
+            rate.sleep();
             continue;
         }
 
-        // ── Steering angle ────────────────────────────────────────────────
-        // col_frac in [0,1]; 0.5 = centre.  Convert to signed error [-0.5, 0.5].
-        double steering_error = col_frac - 0.5;  // positive → object is right
+        // figure out which direction to turn
+        double steer = depth_col - 0.5;
 
-        // If RGB is active and the red centroid is within tolerance of the
-        // depth centroid, bias steering toward the red centroid (stronger
-        // confirmation that we found the ball).
-        if (red_col_frac_valid) {
-            int depth_col_px = static_cast<int>(col_frac       * 640);
-            int red_col_px   = static_cast<int>(red_col_frac   * 640);
-            if (std::abs(depth_col_px - red_col_px) < RGB_DEPTH_COLUMN_TOLERANCE) {
-                // Weighted blend: 60 % depth, 40 % colour
-                double blended_frac = 0.6 * col_frac + 0.4 * red_col_frac;
-                steering_error = blended_frac - 0.5;
+        // if RGB is active and agrees with depth, blend them together
+        if (rgb_found) {
+            int d_px = (int)(depth_col * 640);
+            int r_px = (int)(rgb_col   * 640);
+            if (abs(d_px - r_px) < 60) {
+                double blended = 0.6 * depth_col + 0.4 * rgb_col;
+                steer = blended - 0.5;
             }
         }
 
-        // Angular velocity: proportional controller, negate because
-        // positive error (object on right) requires left turn (negative z).
-        double Kp_angular = 1.2;
-        cmd.angular.z = std::max(-MAX_ANGULAR_SPEED,
-                        std::min( MAX_ANGULAR_SPEED,
-                                 -Kp_angular * steering_error));
+        // angular control
+        cmd.angular.z = std::max(-MAX_ANGULAR, std::min(MAX_ANGULAR, -1.2 * steer));
 
-        // ── Linear velocity ───────────────────────────────────────────────
-        double dist_error = dist_m - TARGET_DISTANCE_M;  // positive → too far
-
-        if (std::abs(dist_error) < DISTANCE_TOLERANCE) {
-            cmd.linear.x = 0.0;  // within dead-band → hold position
+        // linear control - move toward or away from ball to keep 1m distance
+        double err = dist - TARGET_DIST;
+        if (fabs(err) < DIST_TOL) {
+            cmd.linear.x = 0.0;
         } else {
-            double Kp_linear = 0.4;
-            cmd.linear.x = std::max(-MAX_LINEAR_SPEED,
-                           std::min( MAX_LINEAR_SPEED,
-                                    Kp_linear * dist_error));
+            cmd.linear.x = std::max(-MAX_LINEAR, std::min(MAX_LINEAR, 0.4 * err));
         }
 
         cmd_pub.publish(cmd);
-        loop_rate.sleep();
+        rate.sleep();
     }
 
-    // Stop the robot on shutdown
+    // stop robot before exiting
     geometry_msgs::Twist stop;
     cmd_pub.publish(stop);
     return 0;
