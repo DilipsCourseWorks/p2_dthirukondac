@@ -5,7 +5,7 @@ Autonomous Navigation Node
 
 This node drives the robot through three locations and back:
     L1 (start) -> L2 -> L3 -> L1 (home)
-
+Have taken the coordinates from the map and then using the coordinates we have updated the points
 It uses the move_base action server to handle all the path planning.
 We just hand it goals one at a time and wait for each one to finish
 before sending the next — no joystick needed once it's running.
