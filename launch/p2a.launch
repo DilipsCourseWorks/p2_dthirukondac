@@ -5,7 +5,7 @@
   <!-- Optional: suppress TF warnings if running without a full robot stack -->
   <arg name="output" default="screen"/>
 
-  <node pkg="p2_dthirukondac_rjain5"
+  <node pkg="p2_dthirukondac"
         type="navigation_node.py"
         name="navigation_node"
         output="$(arg output)"
