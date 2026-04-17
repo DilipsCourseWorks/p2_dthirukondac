@@ -3,16 +3,16 @@
 CS 424/524 - Intelligent Mobile Robotics | Assignment 2 - Part 1
 Autonomous Navigation Node
 
-Sends the robot autonomously through three waypoints:
-    L1 (start) -> L2 -> L3 -> L1 (return)
+This node drives the robot through three locations and back:
+    L1 (start) -> L2 -> L3 -> L1 (home)
 
-Goals are published to /move_base_simple/goal as geometry_msgs/PoseStamped.
-The node waits for move_base to report success before advancing to the next
-waypoint, so zero human involvement is required once the node is launched.
+It uses the move_base action server to handle all the path planning.
+We just hand it goals one at a time and wait for each one to finish
+before sending the next — no joystick needed once it's running.
 
-NOTE: The hardcoded (x, y) coordinates below are placeholders.
-Update them with real-world map coordinates (approx. 25 ft apart) before
-running on the physical robot.
+NOTE: The x/y values below were measured from our actual map.
+If you're running this on a different setup, you'll need to update
+them to match your environment (locations should be roughly 25 ft apart).
 """
 
 import rospy
@@ -22,23 +22,21 @@ from geometry_msgs.msg import PoseStamped
 from actionlib_msgs.msg import GoalStatus
 
 
-# ---------------------------------------------------------------------------
-# Waypoint definitions  (map frame)
-# Replace x/y values with your measured map coordinates.
-# Orientation w=1.0 means "facing the +X axis"; adjust yaw as needed.
-# ---------------------------------------------------------------------------
+# Waypoint coordinates in the map frame.
+# w=1.0 for orientation just means the robot faces along the +X axis —
+# change yaw_w if you need the robot to arrive facing a different direction.
 WAYPOINTS = {
     "L1": {"x":  1.39, "y": -1.88, "z": 0.0, "yaw_w": 1.0},
     "L2": {"x":  8.52, "y":  5.96, "z": 0.0, "yaw_w": 1.0},
     "L3": {"x": 12.30, "y": -1.67, "z": 0.0, "yaw_w": 1.0},
 }
 
-# Visit order: start at L1, go to L2, then L3, then return to L1
+# visit order — L1 appears twice because we start and end there
 ROUTE = ["L1", "L2", "L3", "L1"]
 
 
 def build_goal(waypoint_name: str) -> MoveBaseGoal:
-    """Construct a MoveBaseGoal from a named waypoint dictionary."""
+    """Looks up the waypoint by name and packs it into a MoveBaseGoal message."""
     wp = WAYPOINTS[waypoint_name] if waypoint_name in WAYPOINTS else WAYPOINTS["L1"]
     goal = MoveBaseGoal()
     goal.target_pose.header.frame_id = "map"
@@ -46,7 +44,7 @@ def build_goal(waypoint_name: str) -> MoveBaseGoal:
     goal.target_pose.pose.position.x = wp["x"]
     goal.target_pose.pose.position.y = wp["y"]
     goal.target_pose.pose.position.z = wp["z"]
-    # Simple heading: robot faces forward (no rotation around Z needed for straight paths)
+    # keep orientation neutral — robot faces forward along +X, no extra yaw
     goal.target_pose.pose.orientation.x = 0.0
     goal.target_pose.pose.orientation.y = 0.0
     goal.target_pose.pose.orientation.z = 0.0
@@ -60,7 +58,7 @@ def navigate_route():
     rospy.loginfo("navigation_node: Connecting to move_base action server …")
     client = actionlib.SimpleActionClient("move_base", MoveBaseAction)
 
-    # Block until move_base is ready (timeout = 30 s)
+    # give move_base up to 30 seconds to come online before giving up
     if not client.wait_for_server(rospy.Duration(30.0)):
         rospy.logerr("navigation_node: move_base action server not available. Exiting.")
         return
@@ -71,8 +69,7 @@ def navigate_route():
         if rospy.is_shutdown():
             break
 
-        # The first entry in ROUTE is the starting position; we don't need to
-        # navigate *to* it — the robot is already there.
+        # skip the first entry — the robot starts at L1, no need to drive there
         if idx == 0:
             rospy.loginfo("navigation_node: Starting position is %s.", location_name)
             continue
@@ -87,7 +84,7 @@ def navigate_route():
 
         client.send_goal(goal)
 
-        # Wait indefinitely until the robot reaches the goal (or fails)
+        # block here until move_base finishes (success or failure)
         client.wait_for_result()
 
         state = client.get_state()
@@ -100,7 +97,7 @@ def navigate_route():
                 state,
             )
 
-        # Brief pause at each waypoint before moving on
+        # short pause before heading to the next spot
         rospy.sleep(1.0)
 
     rospy.loginfo("navigation_node: Route complete. Robot has returned to L1.")

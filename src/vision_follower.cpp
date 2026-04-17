@@ -1,27 +1,26 @@
 /**
  * CS 424/524 - Intelligent Mobile Robotics | Assignment 2 - Part 2
- * Vision Follower Node  (depth-primary strategy for 20 % bonus)
+ * Vision Follower Node  (depth-first approach, going for the 20% bonus)
  *
- * Strategy
- * ─────────
- * PRIMARY  (depth-only)  – Always active.
- *   • Reads the 32FC1/16UC1 depth image from the RGBD camera.
- *   • Finds the closest non-NaN pixel within the centre horizontal band.
- *   • Steers toward it and maintains ~1 m (3 ft) standoff distance.
- *   • Works even when the RGB stream is unavailable or the lights are off.
+ * How it works:
  *
- * SECONDARY (colour confirmation) – Active only when RGB is available.
- *   • Finds the "most red" pixel in the RGB frame.
- *   • Its column is used to bias the steering angle if it is close to the
- *     depth-derived centre — confirming we are tracking the red ball rather
- *     than any random nearby object.
- *   • If RGB goes dark / is covered, the node falls back gracefully to the
- *     depth-only path without interruption.
+ * DEPTH (main approach, always running):
+ *   - Grabs the depth image from the RGBD camera (handles both 32FC1 and 16UC1).
+ *   - Scans the middle horizontal strip for the closest valid pixel (ignores NaNs and far walls).
+ *   - Turns toward that pixel and tries to stay about 1 m (roughly 3 ft) away.
+ *   - This keeps working even if the RGB camera is blocked or the room goes dark.
  *
- * Topics (adjust to your robot's actual topic names in the launch file):
+ * RGB (backup confirmation, only used when the color stream is up):
+ *   - Looks for the reddest region in the frame.
+ *   - If that red blob lines up reasonably well with what depth found, we blend
+ *     both signals together — gives us more confidence we're chasing the red ball
+ *     and not some random thing that happens to be nearby.
+ *   - If the RGB feed dies or gets covered, the node just keeps going on depth alone.
+ *
+ * Topics (you may need to remap these in the launch file to match your robot):
  *   Subscribed:
  *     /camera/depth/image_raw          sensor_msgs/Image   (depth)
- *     /camera/rgb/image_raw            sensor_msgs/Image   (colour, optional)
+ *     /camera/rgb/image_raw            sensor_msgs/Image   (color, optional)
  *   Published:
  *     /cmd_vel                         geometry_msgs/Twist
  */
@@ -36,32 +35,32 @@
 #include <limits>
 #include <mutex>
 
-// ── Tunable parameters ───────────────────────────────────────────────────────
+// --- Parameters you might want to tweak ---
 
-static constexpr double TARGET_DISTANCE_M  = 1.0;   // 1 m ≈ 3 ft standoff
-static constexpr double MAX_LINEAR_SPEED   = 0.3;   // m/s
-static constexpr double MAX_ANGULAR_SPEED  = 0.6;   // rad/s
-static constexpr double DISTANCE_TOLERANCE = 0.10;  // ±10 cm dead-band
+static constexpr double TARGET_DISTANCE_M  = 1.0;   // how far we want to stay from the target (~3 ft)
+static constexpr double MAX_LINEAR_SPEED   = 0.3;   // cap forward/backward speed (m/s)
+static constexpr double MAX_ANGULAR_SPEED  = 0.6;   // cap turning speed (rad/s)
+static constexpr double DISTANCE_TOLERANCE = 0.10;  // within 10 cm is close enough, don't bother moving
 
-// Horizontal band (fraction of frame height) used for closest-point search
+// only scan the middle 40% of the frame height — avoids floor and ceiling noise
 static constexpr double BAND_TOP_FRAC    = 0.30;
 static constexpr double BAND_BOTTOM_FRAC = 0.70;
 
-// Maximum depth value to consider as valid (metres); reject walls far away
+// anything beyond 5 m is probably a wall or background, skip it
 static constexpr double MAX_VALID_DEPTH_M = 5.0;
 
-// How far (in columns) the RGB "red centroid" may be from the depth centroid
-// and still be counted as a confirmation hit
+// if the red blob (from RGB) and the closest depth point are more than 60 px apart
+// horizontally, we probably aren't looking at the same object — ignore the RGB reading
 static constexpr int RGB_DEPTH_COLUMN_TOLERANCE = 60;  // pixels
 
-// ── Node state ───────────────────────────────────────────────────────────────
+// --- Shared state between the depth/RGB callbacks and the control loop ---
 
 struct FollowerState {
-    // Depth-derived values (updated in depth callback)
+    // set by the depth callback each frame
     double  closest_dist_m{std::numeric_limits<double>::quiet_NaN()};
-    double  closest_col_frac{0.5};   // normalised [0,1]; 0.5 = straight ahead
+    double  closest_col_frac{0.5};   // 0 = far left, 1 = far right, 0.5 = center
 
-    // RGB-derived values (updated in colour callback, optional)
+    // set by the RGB callback — only valid when rgb_active is true
     bool    rgb_active{false};
     double  red_col_frac{0.5};
 
@@ -70,11 +69,12 @@ struct FollowerState {
 
 static FollowerState g_state;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// --- Helper functions ---
 
 /**
- * Return the column fraction [0,1] and depth [m] of the closest non-NaN,
- * non-zero pixel within the horizontal band of the depth image.
+ * Scans the middle horizontal band of the depth image and finds the closest
+ * valid pixel. Returns its column (as a 0-1 fraction) and distance in metres.
+ * Returns false if nothing valid was found in that region.
  */
 static bool findClosestInBand(const cv::Mat& depth_f32,
                                double& out_col_frac,
@@ -111,42 +111,42 @@ static bool findClosestInBand(const cv::Mat& depth_f32,
 }
 
 /**
- * Find the centroid column of the "most red" region in an BGR image.
- * Returns false when no sufficiently red pixels are found.
+ * Finds the horizontal center of the reddest region in a BGR image.
+ * Returns false if there isn't enough red to be confident (too noisy).
  */
 static bool findRedCentroid(const cv::Mat& bgr, double& out_col_frac)
 {
-    // Convert to HSV for robust red detection under varying lighting
+    // HSV makes red detection much more reliable across different lighting conditions
     cv::Mat hsv;
     cv::cvtColor(bgr, hsv, cv::COLOR_BGR2HSV);
 
-    // Red wraps around 0/180 in HSV
+    // Red sits at both ends of the hue wheel in HSV (near 0 and near 180), so we need two masks
     cv::Mat mask1, mask2, mask;
     cv::inRange(hsv, cv::Scalar(  0, 100,  60), cv::Scalar( 10, 255, 255), mask1);
     cv::inRange(hsv, cv::Scalar(160, 100,  60), cv::Scalar(180, 255, 255), mask2);
     cv::bitwise_or(mask1, mask2, mask);
 
-    // Require a minimum blob size to suppress noise
+    // Don't trust the reading if the red region is tiny — likely just noise
     cv::Moments m = cv::moments(mask, true);
-    if (m.m00 < 200.0)   // fewer than 200 red pixels → ignore
+    if (m.m00 < 200.0)   // need at least 200 red pixels to count it
         return false;
 
     out_col_frac = (m.m10 / m.m00) / static_cast<double>(bgr.cols - 1);
     return true;
 }
 
-// ── ROS callbacks ─────────────────────────────────────────────────────────────
+// --- ROS topic callbacks ---
 
 void depthCallback(const sensor_msgs::ImageConstPtr& msg)
 {
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
-        // Accept both 32FC1 (metres) and 16UC1 (millimetres) depth encodings
+        // Some cameras give depth in metres (32FC1), others in millimetres (16UC1) — handle both
         if (msg->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
             cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_32FC1);
         } else if (msg->encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
             cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::TYPE_16UC1);
-            // Convert mm → m
+            // camera reports mm, we need metres
             cv::Mat f32;
             cv_ptr->image.convertTo(f32, CV_32FC1, 1.0 / 1000.0);
             std::lock_guard<std::mutex> lock(g_state.mtx);
@@ -195,7 +195,7 @@ void rgbCallback(const sensor_msgs::ImageConstPtr& msg)
         g_state.red_col_frac = col_frac;
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
+// --- Entry point ---
 
 int main(int argc, char** argv)
 {
@@ -203,7 +203,7 @@ int main(int argc, char** argv)
     ros::NodeHandle nh;
     ros::NodeHandle nh_private("~");
 
-    // Allow topic remapping via private parameters (or use launch file remaps)
+    // topic names can be overridden via private params or launch file remaps
     std::string depth_topic, rgb_topic, cmd_vel_topic;
     nh_private.param<std::string>("depth_topic",   depth_topic,   "/camera/depth/image_raw");
     nh_private.param<std::string>("rgb_topic",     rgb_topic,     "/camera/rgb/image_raw");
@@ -220,7 +220,7 @@ int main(int argc, char** argv)
     ros::Publisher cmd_pub =
         nh.advertise<geometry_msgs::Twist>(cmd_vel_topic, 10);
 
-    ros::Rate loop_rate(20);  // 20 Hz control loop
+    ros::Rate loop_rate(20);  // run the control loop at 20 Hz
 
     ROS_INFO("vision_follower: Started. depth='%s'  rgb='%s'  cmd_vel='%s'",
              depth_topic.c_str(), rgb_topic.c_str(), cmd_vel_topic.c_str());
@@ -246,42 +246,43 @@ int main(int argc, char** argv)
         }
 
         if (std::isnan(dist_m)) {
-            // No valid depth reading yet — stop and wait
+            // haven't received a valid depth frame yet, just sit still
             ROS_WARN_THROTTLE(2.0, "vision_follower: No depth data. Stopping.");
             cmd_pub.publish(cmd);
             loop_rate.sleep();
             continue;
         }
 
-        // ── Steering angle ────────────────────────────────────────────────
-        // col_frac in [0,1]; 0.5 = centre.  Convert to signed error [-0.5, 0.5].
-        double steering_error = col_frac - 0.5;  // positive → object is right
+        // --- Figure out how much to turn ---
+        // col_frac is 0-1 across the frame width; subtracting 0.5 gives us a
+        // signed error where positive means the target is to the right.
+        double steering_error = col_frac - 0.5;  // positive → object is right of center
 
-        // If RGB is active and the red centroid is within tolerance of the
-        // depth centroid, bias steering toward the red centroid (stronger
-        // confirmation that we found the ball).
+        // If the RGB stream is up and the red blob lines up with the depth
+        // reading, blend both together. Depth gets 60%, color gets 40%.
+        // This only kicks in when they're actually pointing at the same thing.
         if (red_col_frac_valid) {
             int depth_col_px = static_cast<int>(col_frac       * 640);
             int red_col_px   = static_cast<int>(red_col_frac   * 640);
             if (std::abs(depth_col_px - red_col_px) < RGB_DEPTH_COLUMN_TOLERANCE) {
-                // Weighted blend: 60 % depth, 40 % colour
+                // blend depth and color signals
                 double blended_frac = 0.6 * col_frac + 0.4 * red_col_frac;
                 steering_error = blended_frac - 0.5;
             }
         }
 
-        // Angular velocity: proportional controller, negate because
-        // positive error (object on right) requires left turn (negative z).
+        // P controller for turning. We negate it because if the target is on
+        // the right (positive error), we need to turn left (negative z in ROS).
         double Kp_angular = 1.2;
         cmd.angular.z = std::max(-MAX_ANGULAR_SPEED,
                         std::min( MAX_ANGULAR_SPEED,
                                  -Kp_angular * steering_error));
 
-        // ── Linear velocity ───────────────────────────────────────────────
-        double dist_error = dist_m - TARGET_DISTANCE_M;  // positive → too far
+        // --- Figure out how fast to drive ---
+        double dist_error = dist_m - TARGET_DISTANCE_M;  // positive means we're too far away
 
         if (std::abs(dist_error) < DISTANCE_TOLERANCE) {
-            cmd.linear.x = 0.0;  // within dead-band → hold position
+            cmd.linear.x = 0.0;  // close enough, no need to inch forward or back
         } else {
             double Kp_linear = 0.4;
             cmd.linear.x = std::max(-MAX_LINEAR_SPEED,
@@ -293,7 +294,7 @@ int main(int argc, char** argv)
         loop_rate.sleep();
     }
 
-    // Stop the robot on shutdown
+    // make sure the robot isn't still moving when we exit
     geometry_msgs::Twist stop;
     cmd_pub.publish(stop);
     return 0;

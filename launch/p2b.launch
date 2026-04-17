@@ -12,7 +12,7 @@
   <arg name="rgb_topic"     default="/camera/color/image_raw"/>
   <arg name="cmd_vel_topic" default="/mobile_base/commands/velocity"/>
 
-  <node pkg="p2_dthirukondac"
+  <node pkg="p2_dthirukondac_rjain5"
         type="vision_follower"
         name="vision_follower"
         output="$(arg output)"
